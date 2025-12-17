@@ -2,7 +2,7 @@
 % 测试 ASC 提取的 L、alpha、gamma 参数估计功能
 %
 % 此脚本演示：
-% 1. 创建合成散射体图像（包含不同长度的散射体）
+% 1. 加载 MSTAR 数据集样本或创建合成散射体图像
 % 2. 使用增强的 main_ascm_nomp_v6 提取 ASC 参数
 % 3. 显示和验证提取的 L、alpha、gamma 参数
 % 4. 可视化结果
@@ -11,63 +11,135 @@ clear; close all; clc;
 
 fprintf('=== ASC Parameter Estimation Test ===\n\n');
 
-%% 1. 创建测试图像
-% 由于没有实际 MSTAR 数据，我们创建一个合成图像进行测试
-fprintf('1. Creating synthetic test image...\n');
+%% 配置 MSTAR 数据集路径
+% 设置您的 MSTAR 数据集路径
+% 如果路径不存在，将使用合成数据
+mstar_data_path = 'D:\MATLABworks\mat_setup_MSTAR\MSTAR_PUBLIC_TARGETS_CHIPS_T72_BMP2_BTR70_SLICY\TARGETS\TRAIN\17_DEG\BTR70\SN_C71';
 
-im_size = 128;
-Img = zeros(im_size, im_size);
+%% 1. 加载或创建测试图像
+fprintf('1. Loading test image...\n');
 
-% 设置随机种子以保证可重复性
-rand('seed', 42);
-randn('seed', 42);
+% 检查 MSTAR 数据路径是否存在
+use_mstar_data = exist(mstar_data_path, 'dir') == 7;
 
-% 添加背景噪声
-Img = Img + 0.05 * randn(im_size, im_size);
-
-% 创建几个不同长度的散射体
-% 散射体 1: 中心位置，长度约 15 像素，角度 30 度
-center1 = [64, 64];
-angle1 = 30 * pi / 180;
-length1 = 15;
-for i = -length1/2:length1/2
-    x = round(center1(1) + i * cos(angle1));
-    y = round(center1(2) + i * sin(angle1));
-    if x > 0 && x <= im_size && y > 0 && y <= im_size
-        Img(y, x) = Img(y, x) + 1.0 * exp(-0.1 * abs(i));
+if use_mstar_data
+    % 使用 MSTAR 数据集
+    fprintf('   Using MSTAR dataset from: %s\n', mstar_data_path);
+    
+    % 获取所有 .mat 或 .jpeg 文件
+    mat_files = dir(fullfile(mstar_data_path, '*.mat'));
+    jpeg_files = dir(fullfile(mstar_data_path, '*.jpeg'));
+    img_files = [mat_files; jpeg_files];
+    
+    if isempty(img_files)
+        fprintf('   Warning: No data files found in MSTAR path.\n');
+        fprintf('   Falling back to synthetic data.\n');
+        use_mstar_data = false;
+    else
+        % 使用随机种子随机选择一个样本
+        rng('shuffle');  % 使用当前时间作为随机种子
+        selected_idx = randi(length(img_files));
+        selected_file = img_files(selected_idx);
+        selected_path = fullfile(mstar_data_path, selected_file.name);
+        
+        fprintf('   Total files found: %d\n', length(img_files));
+        fprintf('   Randomly selected: %s\n', selected_file.name);
+        
+        % 加载图像
+        [~, ~, ext] = fileparts(selected_file.name);
+        if strcmpi(ext, '.mat')
+            % 加载 .mat 文件
+            data = load(selected_path);
+            % 尝试常见的变量名
+            if isfield(data, 'image')
+                Img = double(data.image);
+            elseif isfield(data, 'img')
+                Img = double(data.img);
+            elseif isfield(data, 'data')
+                Img = double(data.data);
+            else
+                % 使用第一个数值型变量
+                fnames = fieldnames(data);
+                for i = 1:length(fnames)
+                    if isnumeric(data.(fnames{i}))
+                        Img = double(data.(fnames{i}));
+                        break;
+                    end
+                end
+            end
+        else
+            % 加载图像文件
+            Img = double(imread(selected_path));
+            % 如果是 RGB，转换为灰度
+            if size(Img, 3) == 3
+                % 简单的 RGB 到灰度转换（兼容 Octave）
+                Img = 0.2989 * Img(:,:,1) + 0.5870 * Img(:,:,2) + 0.1140 * Img(:,:,3);
+            end
+        end
+        
+        fprintf('   Image size: %dx%d\n', size(Img,1), size(Img,2));
+        fprintf('   Data type: Real MSTAR sample\n\n');
     end
 end
 
-% 散射体 2: 偏移位置，长度约 8 像素，角度 -45 度
-center2 = [80, 50];
-angle2 = -45 * pi / 180;
-length2 = 8;
-for i = -length2/2:length2/2
-    x = round(center2(1) + i * cos(angle2));
-    y = round(center2(2) + i * sin(angle2));
-    if x > 0 && x <= im_size && y > 0 && y <= im_size
-        Img(y, x) = Img(y, x) + 0.8 * exp(-0.15 * abs(i));
+if ~use_mstar_data
+    % 创建合成测试图像（当 MSTAR 数据不可用时）
+    fprintf('   Using synthetic test image...\n');
+    
+    im_size = 128;
+    Img = zeros(im_size, im_size);
+    
+    % 设置随机种子以保证可重复性
+    rand('seed', 42);
+    randn('seed', 42);
+    
+    % 添加背景噪声
+    Img = Img + 0.05 * randn(im_size, im_size);
+    
+    % 创建几个不同长度的散射体
+    % 散射体 1: 中心位置，长度约 15 像素，角度 30 度
+    center1 = [64, 64];
+    angle1 = 30 * pi / 180;
+    length1 = 15;
+    for i = -length1/2:length1/2
+        x = round(center1(1) + i * cos(angle1));
+        y = round(center1(2) + i * sin(angle1));
+        if x > 0 && x <= im_size && y > 0 && y <= im_size
+            Img(y, x) = Img(y, x) + 1.0 * exp(-0.1 * abs(i));
+        end
     end
+    
+    % 散射体 2: 偏移位置，长度约 8 像素，角度 -45 度
+    center2 = [80, 50];
+    angle2 = -45 * pi / 180;
+    length2 = 8;
+    for i = -length2/2:length2/2
+        x = round(center2(1) + i * cos(angle2));
+        y = round(center2(2) + i * sin(angle2));
+        if x > 0 && x <= im_size && y > 0 && y <= im_size
+            Img(y, x) = Img(y, x) + 0.8 * exp(-0.15 * abs(i));
+        end
+    end
+    
+    % 散射体 3: 短散射体，长度约 3 像素
+    center3 = [40, 70];
+    Img(center3(2)-1:center3(2)+1, center3(1)) = 0.6;
+    
+    % 平滑图像使其更真实
+    % 创建简单的高斯滤波器（不依赖工具箱）
+    sigma = 1.0;
+    kernel_size = ceil(3*sigma)*2 + 1;
+    half = floor(kernel_size/2);
+    [x, y] = meshgrid(-half:half, -half:half);
+    kernel = exp(-(x.^2 + y.^2)/(2*sigma^2));
+    kernel = kernel / sum(kernel(:));
+    Img = conv2(Img, kernel, 'same');
+    Img = max(0, Img);
+    
+    fprintf('   Image size: %dx%d\n', size(Img,1), size(Img,2));
+    fprintf('   Number of synthetic scatterers: 3\n');
+    fprintf('   Expected lengths: ~15, ~8, ~3 pixels\n\n');
 end
-
-% 散射体 3: 短散射体，长度约 3 像素
-center3 = [40, 70];
-Img(center3(2)-1:center3(2)+1, center3(1)) = 0.6;
-
-% 平滑图像使其更真实
-% 创建简单的高斯滤波器（不依赖工具箱）
-sigma = 1.0;
-kernel_size = ceil(3*sigma)*2 + 1;
-half = floor(kernel_size/2);
-[x, y] = meshgrid(-half:half, -half:half);
-kernel = exp(-(x.^2 + y.^2)/(2*sigma^2));
-kernel = kernel / sum(kernel(:));
-Img = conv2(Img, kernel, 'same');
-Img = max(0, Img);
-
-fprintf('   Image size: %dx%d\n', size(Img,1), size(Img,2));
-fprintf('   Number of synthetic scatterers: 3\n');
-fprintf('   Expected lengths: ~15, ~8, ~3 pixels\n\n');
 
 %% 2. 配置参数
 fprintf('2. Configuring parameters...\n');
