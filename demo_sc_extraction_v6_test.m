@@ -18,6 +18,10 @@ fprintf('1. Creating synthetic test image...\n');
 im_size = 128;
 Img = zeros(im_size, im_size);
 
+% 设置随机种子以保证可重复性
+rand('seed', 42);
+randn('seed', 42);
+
 % 添加背景噪声
 Img = Img + 0.05 * randn(im_size, im_size);
 
@@ -88,6 +92,8 @@ tic;
 [theta_list, residual_norms, info] = main_ascm_nomp_v6(Img, user_cfg);
 elapsed = toc;
 fprintf('   Extraction completed in %.3f seconds\n\n', elapsed);
+
+
 
 %% 4. 显示结果
 fprintf('4. Extraction Results:\n');

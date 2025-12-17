@@ -25,7 +25,8 @@
       [theta_list, residual_norms] = v6_run_nomp(I, roi_mask, dict, cfg);
 
       % 原子聚合和参数估计
-      if cfg.aggregate_atoms && ~isempty(theta_list)
+      do_aggregate = isfield(cfg, 'aggregate_atoms') && cfg.aggregate_atoms;
+      if do_aggregate && ~isempty(theta_list)
           groups = v6_aggregate_atoms(theta_list, cfg);
           if cfg.verbose && ~isempty(groups)
               fprintf('[AGGREGATE] Found %d groups:\n', numel(groups));
@@ -33,12 +34,12 @@
                   fprintf('  Group %d: atoms [%s]\n', g, num2str(groups{g}));
               end
           end
-          if cfg.refine_parameters
+          do_refine = isfield(cfg, 'refine_parameters') && cfg.refine_parameters;
+          if do_refine
               theta_list = v6_refine_L_alpha_gamma(I, roi_mask, theta_list, groups, dict, cfg);
           end
-          info.groups = groups;
       else
-          info.groups = {};
+          groups = {};
       end
 
       % 解释能量
@@ -61,6 +62,7 @@
       info.num_atoms       = numel(theta_list);
       info.roi_mask        = roi_mask;
       info.dict            = dict;
+      info.groups          = groups;
       if cfg.verbose
           fprintf('--- ASC summary ---\n');
           fprintf('  atoms       = %d\n', info.num_atoms);
