@@ -161,6 +161,10 @@ user_cfg.use_gamma_decay = true;
 user_cfg.aggregate_dist_thresh = 5.0;  % 增加距离阈值
 user_cfg.aggregate_angle_thresh = 20;  % 增加角度阈值
 
+% 增加字典大小：使用更密集的角度采样
+% 默认是 -80:5:80 (33个角度)，这里改为步长2度，增加到81个角度
+user_cfg.phi_list_deg = -80:2:80;  % 更密集的角度网格，提高匹配精度
+
 % 自动调整 patch_size 以适应小图像
 min_img_size = min(size(Img));
 default_patch_size = 17;
@@ -176,6 +180,10 @@ fprintf('   refine_parameters: %d\n', user_cfg.refine_parameters);
 fprintf('   use_gamma_decay: %d\n', user_cfg.use_gamma_decay);
 if isfield(user_cfg, 'patch_size')
     fprintf('   patch_size: %d\n', user_cfg.patch_size);
+end
+if isfield(user_cfg, 'phi_list_deg')
+    fprintf('   Dictionary angles: %d (step=%.1f deg)\n', numel(user_cfg.phi_list_deg), ...
+        mean(diff(user_cfg.phi_list_deg)));
 end
 fprintf('\n');
 
@@ -216,8 +224,14 @@ fprintf('   --------------------------------------------------\n');
 
 for i = 1:numel(theta_list)
     t = theta_list(i);
+    % 安全访问 gamma 字段（兼容旧版本）
+    if isfield(t, 'gamma')
+        gamma_val = t.gamma;
+    else
+        gamma_val = 0.1;  % 默认值
+    end
     fprintf('   %2d| %-7s| (%3d,%3d) | %5.2f | %4.1f| %5.2f | %5.3f | %6.1f\n', ...
-        i, t.class(1:min(7,end)), t.row, t.col, t.A, t.L, t.alpha, t.gamma, t.phi*180/pi);
+        i, t.class(1:min(7,end)), t.row, t.col, t.A, t.L, t.alpha, gamma_val, t.phi*180/pi);
 end
 fprintf('   --------------------------------------------------\n\n');
 
@@ -233,7 +247,15 @@ fprintf('   Localized atoms: %d\n', numel(localized_idx));
 if ~isempty(distributed_idx)
     L_vals = [theta_list(distributed_idx).L];
     alpha_vals = [theta_list(distributed_idx).alpha];
-    gamma_vals = [theta_list(distributed_idx).gamma];
+    % 安全访问 gamma 字段
+    gamma_vals = zeros(1, numel(distributed_idx));
+    for idx = 1:numel(distributed_idx)
+        if isfield(theta_list(distributed_idx(idx)), 'gamma')
+            gamma_vals(idx) = theta_list(distributed_idx(idx)).gamma;
+        else
+            gamma_vals(idx) = 0.1;  % 默认值
+        end
+    end
     
     fprintf('   Distributed atoms: %d\n', numel(distributed_idx));
     fprintf('   L statistics:\n');
