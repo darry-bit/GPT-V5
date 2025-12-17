@@ -9,7 +9,15 @@
       if ~all(isfinite(I(:))), error('Input Img contains NaN/Inf.'); end
       if cfg.do_log, I = log1p(I); end
       I = I - min(I(:)); if max(I(:))>0, I = I./max(I(:)); end
-      if cfg.do_smooth, I = imgaussfilt(I, cfg.sigma_smooth); end
+      if cfg.do_smooth
+          % 创建高斯滤波器（不依赖工具箱）
+          kernel_size = ceil(3*cfg.sigma_smooth)*2 + 1;
+          half = floor(kernel_size/2);
+          [x, y] = meshgrid(-half:half, -half:half);
+          kernel = exp(-(x.^2 + y.^2)/(2*cfg.sigma_smooth^2));
+          kernel = kernel / sum(kernel(:));
+          I = conv2(I, kernel, 'same');
+      end
       cfg = v6_validate_cfg(cfg, size(I));
 
       roi_mask = v6_build_roi(I, cfg);
@@ -19,6 +27,12 @@
       % 原子聚合和参数估计
       if cfg.aggregate_atoms && ~isempty(theta_list)
           groups = v6_aggregate_atoms(theta_list, cfg);
+          if cfg.verbose && ~isempty(groups)
+              fprintf('[AGGREGATE] Found %d groups:\n', numel(groups));
+              for g = 1:numel(groups)
+                  fprintf('  Group %d: atoms [%s]\n', g, num2str(groups{g}));
+              end
+          end
           if cfg.refine_parameters
               theta_list = v6_refine_L_alpha_gamma(I, roi_mask, theta_list, groups, dict, cfg);
           end
@@ -121,13 +135,13 @@
       [H,W] = size(I);
       if ~cfg.auto_roi, roi_mask = true(H,W); return; end
       if max(I(:)) <= min(I(:)), roi_mask = true(H,W); return; end
-      T  = graythresh(I) * cfg.roi_thresh_scale;
+      T  = v6_graythresh(I) * cfg.roi_thresh_scale;
       roi = I > T;
-      roi = imclose(roi, strel('disk',2));
-      roi = imfill(roi, 'holes');
+      roi = v6_imclose(roi, 2);
+      roi = v6_imfill(roi);
       if ~any(roi(:)), roi_mask = true(H,W); return; end
-      if cfg.roi_dilate>0, roi = imdilate(roi, strel('disk', cfg.roi_dilate)); end
-      CC = bwconncomp(roi);
+      if cfg.roi_dilate>0, roi = v6_imdilate(roi, cfg.roi_dilate); end
+      CC = v6_bwconncomp(roi);
       if CC.NumObjects > 1
           lens = cellfun(@numel, CC.PixelIdxList); [~, idxMax] = max(lens);
           roi = false(H,W); roi(CC.PixelIdxList{idxMax}) = true;
@@ -584,5 +598,137 @@
               theta_list(idx).alpha = alpha;
               theta_list(idx).gamma = gamma;
           end
+      end
+  end
+
+  %% 简化的 Otsu 阈值算法（不依赖 image 包）
+  function thresh = v6_graythresh(I)
+      % 归一化到 [0, 1]
+      I = double(I);
+      I = (I - min(I(:))) / (max(I(:)) - min(I(:)) + eps);
+      
+      % 计算直方图
+      nbins = 256;
+      counts = histc(I(:), linspace(0, 1, nbins));
+      p = counts / sum(counts);
+      
+      % Otsu 方法寻找最佳阈值
+      omega = cumsum(p);
+      mu = cumsum(p .* (1:nbins)');
+      mu_t = mu(end);
+      
+      sigma_b_squared = (mu_t * omega - mu).^2 ./ (omega .* (1 - omega) + eps);
+      [~, idx] = max(sigma_b_squared);
+      thresh = (idx - 1) / (nbins - 1);
+  end
+
+  %% 简化的形态学膨胀（不依赖 image 包）
+  function BW = v6_imdilate(BW, radius)
+      if radius <= 0, return; end
+      % 创建圆形结构元素
+      [x, y] = meshgrid(-radius:radius, -radius:radius);
+      se = (x.^2 + y.^2) <= radius^2;
+      % 膨胀操作
+      BW = double(BW);
+      BW = conv2(BW, double(se), 'same') > 0;
+  end
+
+  %% 简化的形态学闭运算（不依赖 image 包）
+  function BW = v6_imclose(BW, radius)
+      % 先膨胀后腐蚀
+      BW = v6_imdilate(BW, radius);
+      BW = v6_imerode(BW, radius);
+  end
+
+  %% 简化的形态学腐蚀（不依赖 image 包）
+  function BW = v6_imerode(BW, radius)
+      if radius <= 0, return; end
+      % 创建圆形结构元素
+      [x, y] = meshgrid(-radius:radius, -radius:radius);
+      se = (x.^2 + y.^2) <= radius^2;
+      % 腐蚀操作
+      BW = double(BW);
+      kernel_sum = sum(se(:));
+      result = conv2(BW, double(se), 'same');
+      BW = result >= kernel_sum;
+  end
+
+  %% 简化的孔洞填充（不依赖 image 包）
+  function BW = v6_imfill(BW)
+      % 使用泛洪填充算法
+      [H, W] = size(BW);
+      filled = BW;
+      
+      % 从边界开始标记外部区域
+      border = false(H, W);
+      border(1,:) = ~BW(1,:);
+      border(end,:) = ~BW(end,:);
+      border(:,1) = border(:,1) | ~BW(:,1);
+      border(:,W) = border(:,W) | ~BW(:,W);
+      
+      % 简单的4连通泛洪填充
+      old_sum = 0;
+      new_sum = sum(border(:));
+      iter = 0;
+      max_iter = H * W;
+      
+      while new_sum ~= old_sum && iter < max_iter
+          old_sum = new_sum;
+          % 膨胀标记但限制在非对象区域
+          border_dilated = v6_imdilate(border, 1);
+          border = border_dilated & ~BW;
+          new_sum = sum(border(:));
+          iter = iter + 1;
+      end
+      
+      % 填充：所有未标记的非对象像素都是孔洞
+      filled = BW | ~border;
+  end
+
+  %% 简化的连通分量标记（不依赖 image 包）
+  function CC = v6_bwconncomp(BW)
+      % 4连通分量标记
+      [H, W] = size(BW);
+      labeled = zeros(H, W);
+      label = 0;
+      
+      for i = 1:H
+          for j = 1:W
+              if BW(i,j) && labeled(i,j) == 0
+                  % 新的连通分量
+                  label = label + 1;
+                  % 使用栈进行深度优先搜索
+                  stack = [i, j];
+                  pixels = [];
+                  
+                  while ~isempty(stack)
+                      r = stack(1,1);
+                      c = stack(1,2);
+                      stack(1,:) = [];
+                      
+                      if r < 1 || r > H || c < 1 || c > W
+                          continue;
+                      end
+                      if ~BW(r,c) || labeled(r,c) > 0
+                          continue;
+                      end
+                      
+                      labeled(r,c) = label;
+                      pixels = [pixels; sub2ind([H,W], r, c)]; %#ok<AGROW>
+                      
+                      % 添加4连通邻居
+                      stack = [stack; r-1, c; r+1, c; r, c-1; r, c+1]; %#ok<AGROW>
+                  end
+                  
+                  CC.PixelIdxList{label} = pixels;
+              end
+          end
+      end
+      
+      if label == 0
+          CC.NumObjects = 0;
+          CC.PixelIdxList = {};
+      else
+          CC.NumObjects = label;
       end
   end

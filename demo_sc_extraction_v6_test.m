@@ -51,7 +51,14 @@ center3 = [40, 70];
 Img(center3(2)-1:center3(2)+1, center3(1)) = 0.6;
 
 % 平滑图像使其更真实
-Img = imgaussfilt(Img, 1.0);
+% 创建简单的高斯滤波器（不依赖工具箱）
+sigma = 1.0;
+kernel_size = ceil(3*sigma)*2 + 1;
+half = floor(kernel_size/2);
+[x, y] = meshgrid(-half:half, -half:half);
+kernel = exp(-(x.^2 + y.^2)/(2*sigma^2));
+kernel = kernel / sum(kernel(:));
+Img = conv2(Img, kernel, 'same');
 Img = max(0, Img);
 
 fprintf('   Image size: %dx%d\n', size(Img,1), size(Img,2));
@@ -67,6 +74,9 @@ user_cfg.max_atoms = 30;
 user_cfg.aggregate_atoms = true;
 user_cfg.refine_parameters = true;
 user_cfg.use_gamma_decay = true;
+% 调整聚合参数使其更容易找到组
+user_cfg.aggregate_dist_thresh = 5.0;  % 增加距离阈值
+user_cfg.aggregate_angle_thresh = 20;  % 增加角度阈值
 
 fprintf('   aggregate_atoms: %d\n', user_cfg.aggregate_atoms);
 fprintf('   refine_parameters: %d\n', user_cfg.refine_parameters);
@@ -86,9 +96,17 @@ fprintf('   Total atoms extracted: %d\n', numel(theta_list));
 fprintf('   Explained energy: %.2f%%\n', info.explained_ratio * 100);
 
 if isfield(info, 'groups')
-    fprintf('   Aggregated groups: %d\n\n', numel(info.groups));
+    if ~isempty(info.groups)
+        fprintf('   Aggregated groups: %d\n', numel(info.groups));
+        for g = 1:numel(info.groups)
+            fprintf('     Group %d: atoms [%s]\n', g, num2str(info.groups{g}));
+        end
+        fprintf('\n');
+    else
+        fprintf('   Aggregated groups: 0 (no grouping found)\n\n');
+    end
 else
-    fprintf('   No aggregated groups\n\n');
+    fprintf('   Aggregated groups: N/A (grouping disabled)\n\n');
 end
 
 % 显示每个原子的参数
@@ -150,9 +168,12 @@ total_tests = 4;
 if ~isempty(distributed_idx)
     L_vals = [theta_list(distributed_idx).L];
     test1_pass = any(L_vals ~= 1);
-    fprintf('   [%s] Test 1: L values not fixed at 1\n', ...
-        iif(test1_pass, 'PASS', 'FAIL'));
-    if test1_pass, pass_count = pass_count + 1; end
+    if test1_pass
+        fprintf('   [PASS] Test 1: L values not fixed at 1\n');
+        pass_count = pass_count + 1;
+    else
+        fprintf('   [FAIL] Test 1: L values not fixed at 1\n');
+    end
 else
     fprintf('   [SKIP] Test 1: No distributed atoms\n');
     total_tests = total_tests - 1;
@@ -162,9 +183,12 @@ end
 if ~isempty(distributed_idx)
     alpha_vals = [theta_list(distributed_idx).alpha];
     test2_pass = all(alpha_vals ~= -1.0) && all(isfinite(alpha_vals));
-    fprintf('   [%s] Test 2: Alpha values are valid (not -1.0)\n', ...
-        iif(test2_pass, 'PASS', 'FAIL'));
-    if test2_pass, pass_count = pass_count + 1; end
+    if test2_pass
+        fprintf('   [PASS] Test 2: Alpha values are valid (not -1.0)\n');
+        pass_count = pass_count + 1;
+    else
+        fprintf('   [FAIL] Test 2: Alpha values are valid (not -1.0)\n');
+    end
 else
     fprintf('   [SKIP] Test 2: No distributed atoms\n');
     total_tests = total_tests - 1;
@@ -174,9 +198,12 @@ end
 if ~isempty(distributed_idx)
     gamma_vals = [theta_list(distributed_idx).gamma];
     test3_pass = all(gamma_vals > 0);
-    fprintf('   [%s] Test 3: Gamma values are positive\n', ...
-        iif(test3_pass, 'PASS', 'FAIL'));
-    if test3_pass, pass_count = pass_count + 1; end
+    if test3_pass
+        fprintf('   [PASS] Test 3: Gamma values are positive\n');
+        pass_count = pass_count + 1;
+    else
+        fprintf('   [FAIL] Test 3: Gamma values are positive\n');
+    end
 else
     fprintf('   [SKIP] Test 3: No distributed atoms\n');
     total_tests = total_tests - 1;
@@ -184,9 +211,12 @@ end
 
 % 测试 4: 提取到了原子
 test4_pass = numel(theta_list) > 0;
-fprintf('   [%s] Test 4: Atoms extracted successfully\n', ...
-    iif(test4_pass, 'PASS', 'FAIL'));
-if test4_pass, pass_count = pass_count + 1; end
+if test4_pass
+    fprintf('   [PASS] Test 4: Atoms extracted successfully\n');
+    pass_count = pass_count + 1;
+else
+    fprintf('   [FAIL] Test 4: Atoms extracted successfully\n');
+end
 
 fprintf('\n   Overall: %d/%d tests passed\n', pass_count, total_tests);
 fprintf('   ========================================\n\n');
@@ -231,21 +261,22 @@ if ~isempty(distributed_idx)
     alpha_vals = [theta_list(distributed_idx).alpha];
     gamma_vals = [theta_list(distributed_idx).gamma];
     
-    yyaxis left;
-    plot(distributed_idx, L_vals, 'bo-', 'LineWidth', 2, 'MarkerSize', 8);
-    ylabel('L (Length)');
-    ylim([0, max(L_vals)*1.2]);
-    
-    yyaxis right;
-    plot(distributed_idx, alpha_vals, 'rs-', 'LineWidth', 2, 'MarkerSize', 8);
+    % 使用三个子图代替 yyaxis (Octave 兼容)
     hold on;
-    plot(distributed_idx, gamma_vals*10, 'g^-', 'LineWidth', 2, 'MarkerSize', 8);
+    % 归一化显示
+    L_norm = L_vals / max(max(L_vals), 1);
+    alpha_norm = alpha_vals / max(max(abs(alpha_vals)), 1);
+    gamma_norm = gamma_vals / max(max(gamma_vals), 1);
+    
+    plot(distributed_idx, L_norm, 'bo-', 'LineWidth', 2, 'MarkerSize', 8);
+    plot(distributed_idx, alpha_norm, 'rs-', 'LineWidth', 2, 'MarkerSize', 8);
+    plot(distributed_idx, gamma_norm, 'g^-', 'LineWidth', 2, 'MarkerSize', 8);
     hold off;
-    ylabel('Alpha / Gamma×10');
     
     xlabel('Atom Index');
-    title('Parameter Distribution');
-    legend('L', 'Alpha', 'Gamma×10', 'Location', 'best');
+    ylabel('Normalized Value');
+    title('Parameter Distribution (Normalized)');
+    legend('L', 'Alpha', 'Gamma', 'Location', 'best');
     grid on;
 else
     text(0.5, 0.5, 'No distributed atoms', ...
@@ -256,12 +287,3 @@ end
 fprintf('   Visualization complete.\n\n');
 
 fprintf('=== Test Complete ===\n');
-
-%% Helper function
-function out = iif(condition, true_val, false_val)
-    if condition
-        out = true_val;
-    else
-        out = false_val;
-    end
-end
