@@ -78,7 +78,14 @@ if use_mstar_data
         end
         
         fprintf('   Image size: %dx%d\n', size(Img,1), size(Img,2));
-        fprintf('   Data type: Real MSTAR sample\n\n');
+        fprintf('   Data type: Real MSTAR sample\n');
+        
+        % 验证图像大小并在必要时调整配置
+        min_img_size = min(size(Img));
+        if min_img_size < 17
+            fprintf('   Warning: Image too small (min dimension=%d), adjusting parameters\n', min_img_size);
+        end
+        fprintf('\n');
     end
 end
 
@@ -154,9 +161,23 @@ user_cfg.use_gamma_decay = true;
 user_cfg.aggregate_dist_thresh = 5.0;  % 增加距离阈值
 user_cfg.aggregate_angle_thresh = 20;  % 增加角度阈值
 
+% 自动调整 patch_size 以适应小图像
+min_img_size = min(size(Img));
+default_patch_size = 17;
+if min_img_size < default_patch_size
+    % 确保 patch_size 是奇数且至少为 3
+    adjusted_patch_size = max(3, floor(min_img_size / 2) * 2 - 1);
+    user_cfg.patch_size = adjusted_patch_size;
+    fprintf('   Auto-adjusted patch_size: %d -> %d (image too small)\n', default_patch_size, adjusted_patch_size);
+end
+
 fprintf('   aggregate_atoms: %d\n', user_cfg.aggregate_atoms);
 fprintf('   refine_parameters: %d\n', user_cfg.refine_parameters);
-fprintf('   use_gamma_decay: %d\n\n', user_cfg.use_gamma_decay);
+fprintf('   use_gamma_decay: %d\n', user_cfg.use_gamma_decay);
+if isfield(user_cfg, 'patch_size')
+    fprintf('   patch_size: %d\n', user_cfg.patch_size);
+end
+fprintf('\n');
 
 %% 3. 执行 ASC 提取
 fprintf('3. Running ASC extraction...\n');
