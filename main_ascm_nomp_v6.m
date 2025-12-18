@@ -4,7 +4,7 @@
       fn  = fieldnames(user_cfg);
       for i = 1:numel(fn), cfg.(fn{i}) = user_cfg.(fn{i}); end
 
-      % 预处理
+      % Preprocessing
       I = abs(double(Img));
       if ~all(isfinite(I(:))), error('Input Img contains NaN/Inf.'); end
       if cfg.do_log, I = log1p(I); end
@@ -15,8 +15,14 @@
       roi_mask = v6_build_roi(I, cfg);
       dict = v6_build_dict(cfg);
       [theta_list, residual_norms] = v6_run_nomp(I, roi_mask, dict, cfg);
+      
+      % Aggregate distributed atoms and refine parameters
+      if ~isempty(theta_list)
+          theta_list = v6_aggregate_atoms(theta_list, cfg);
+          theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg);
+      end
 
-      % 解释能量
+      % Explained energy
       R0 = I .* roi_mask; E0 = sum(R0(:).^2);
       if isempty(theta_list)
           E_res = E0;
@@ -43,7 +49,7 @@
       end
   end
 
-  %% 默认参数：CornerDiff + 最小线元
+  %% Default parameters: CornerDiff + minimum line element
   function cfg = v6_default_cfg()
       cfg = struct();
       cfg.do_log       = false;
@@ -55,25 +61,33 @@
       cfg.roi_dilate        = 2;
       cfg.roi_margin        = 4;
 
-      cfg.patch_size    = 17;           % 奇数
-      cfg.L_list        = 1;            % 最小线元
-      cfg.phi_list_deg  = -80:5:80;     % 粗角度网格
+      cfg.patch_size    = 17;           % Odd number
+      cfg.L_list        = 1;            % Minimum line element
+      cfg.phi_list_deg  = -80:5:80;     % Coarse angle grid
       cfg.sigma_loc     = 1.0;
       cfg.sigma_short_thick = 1.0;
-      cfg.sigma_short_thin  = 0.6;      % 未用但保留
+      cfg.sigma_short_thin  = 0.6;      % Unused but kept
 
-      % 阈值与上限（分开控制）
-      cfg.min_ncc_localized   = 0.50;   % CornerDiff 更严格
-      cfg.min_ncc_distributed = 0.20;   % 线元放宽
-      cfg.min_gain_ratio      = 0.002;  % 单线元增益下限
+      % Thresholds and limits (separate control)
+      cfg.min_ncc_localized   = 0.50;   % CornerDiff stricter
+      cfg.min_ncc_distributed = 0.20;   % Line element relaxed
+      cfg.min_gain_ratio      = 0.002;  % Single line element gain lower bound
       cfg.stop_explained_ratio= 0.80;
       cfg.max_atoms           = 24;
-      cfg.max_localized       = 1;      % CornerDiff 最多 1 个
+      cfg.max_localized       = Inf;    % Allow multiple localized scattering centers
       cfg.max_iters           = 128;
+      
+      % Gamma estimation parameters
+      cfg.gamma_localized_range = [0.1, 2.0];  % Localized gamma range
+      cfg.gamma_distributed     = 0;            % Distributed gamma fixed at 0
 
       cfg.do_phi_refine        = true;
       cfg.phi_refine_range_deg = 15;
       cfg.phi_refine_step_deg  = 1;
+      
+      % Aggregation parameters
+      cfg.agg_dist_thresh  = 6;   % Relaxed distance threshold
+      cfg.agg_angle_thresh = 30;  % Relaxed angle threshold (degrees)
 
       cfg.verbose = true;
       cfg.dx=1; cfg.dy=1; cfg.x0=0; cfg.y0=0;
@@ -86,7 +100,9 @@
       if isempty(cfg.phi_list_deg) || any(~isfinite(cfg.phi_list_deg)), error('phi_list_deg must be finite.'); end
       cfg.max_atoms = max(1, floor(cfg.max_atoms));
       cfg.max_iters = max(1, floor(cfg.max_iters));
-      cfg.max_localized = max(0, floor(cfg.max_localized));
+      if ~isinf(cfg.max_localized)
+          cfg.max_localized = max(0, floor(cfg.max_localized));
+      end
       cfg.min_gain_ratio = max(cfg.min_gain_ratio,0);
       cfg.roi_dilate = max(0, round(cfg.roi_dilate));
       cfg.roi_margin = max(0, round(cfg.roi_margin));
@@ -124,7 +140,7 @@
       g = g / max(norm(g(:)), eps);
       idx=idx+1; atoms(:,:,idx)=g; geom{idx}='CornerDiff'; cls{idx}='localized'; Ls(idx)=0; phis(idx)=0;
 
-      % 最小线元（ED_thick，L=1）
+      % Minimum line element (ED_thick, L=1)
       for ang = cfg.phi_list_deg(:).'
           phi = deg2rad(ang);
           patch = v6_build_ed_patch(cfg, 1, phi, 'ED_thick', xx, yy);
@@ -142,7 +158,7 @@
       if nargin < 5
           p = cfg.patch_size; h = (p-1)/2; [xx,yy] = meshgrid(-h:h, -h:h);
       end
-      L_eff = max(L, 1); % 保底 1 像素代表 0.1
+      L_eff = max(L, 1); % Minimum 1 pixel represents 0.1
       switch geom_type
           case 'ED_thick'
               sigma_long  = max(L_eff/3, 0.8);
@@ -164,7 +180,7 @@
       [H,W] = size(I);
       R  = I .* roi_mask; E0 = sum(R(:).^2);
       residual_norms = [];
-      theta_list = struct('row',{},'col',{},'A',{},'geom',{},'class',{},'L',{},'alpha',{},'phi',{},'dict_idx',{},'x',{},'y',{});
+      theta_list = struct('row',{},'col',{},'A',{},'geom',{},'class',{},'L',{},'alpha',{},'gamma',{},'phi',{},'dict_idx',{},'x',{},'y',{});
       if E0 <= 0, return; end
       n_localized = 0;
 
@@ -175,7 +191,7 @@
               geom_type  = dict.geom{j};
               patch = dict.atom(:,:,j);
 
-              % 局域原子数量限制
+              % Localized atom count limit
               if strcmp(class_type,'localized') && n_localized >= cfg.max_localized
                   continue;
               end
@@ -192,7 +208,7 @@
               if den <= eps, continue; end
               ncc = num / den;
 
-              % 分开阈值
+              % Separate thresholds
               min_ncc_req = cfg.min_ncc_distributed;
               if strcmp(class_type,'localized'), min_ncc_req = cfg.min_ncc_localized; end
               if ncc < min_ncc_req, continue; end
@@ -217,7 +233,7 @@
               phi_ref  = phi0; patch_ref = dict.atom(:,:,best.idx);
           end
 
-          % 局部 LS 幅度估计
+          % Local LS amplitude estimation
           [R_patch_full, mask_patch_full] = v6_get_patch(R, roi_mask, best.r, best.c, cfg.patch_size);
           P = patch_ref .* mask_patch_full;
           den_loc = sum(P(:).^2);
@@ -245,8 +261,15 @@
           R = R_new;
           residual_norms(end+1) = sqrt(E_after); %#ok<AGROW>
           [x_m, y_m] = v6_rowcol_to_xy(best.r, best.c, H, W, cfg);
+          
+          % Initial gamma: 0 for distributed, default value for localized (refined later)
+          gamma_init = 0.0;
+          if strcmp(class_type,'localized')
+              gamma_init = 0.5;
+          end
+          
           t = struct('row',best.r,'col',best.c,'A',A,'geom',geom_type,'class',class_type,...
-                     'L',L0,'alpha',-1.0,'phi',phi_ref,'dict_idx',best.idx,'x',x_m,'y',y_m);
+                     'L',L0,'alpha',-1.0,'gamma',gamma_init,'phi',phi_ref,'dict_idx',best.idx,'x',x_m,'y',y_m);
           theta_list(end+1) = t; %#ok<AGROW>
           if strcmp(class_type,'localized'), n_localized = n_localized + 1; end
 
@@ -322,4 +345,189 @@
       c0 = (W + 1) / 2; r0 = (H + 1) / 2;
       x = (c - c0) * cfg.dx + cfg.x0;
       y = (r0 - r) * cfg.dy + cfg.y0;
+  end
+
+  %% Aggregate distributed atoms (Union-Find algorithm)
+  function theta_list = v6_aggregate_atoms(theta_list, cfg)
+      N = numel(theta_list);
+      if N == 0, return; end
+      
+      % Separate localized and distributed atoms
+      is_distributed = false(1, N);
+      for i = 1:N
+          % Determine type by L: L=0 is localized, L>0 is distributed
+          if theta_list(i).L > 0
+              is_distributed(i) = true;
+          end
+      end
+      
+      dist_idx = find(is_distributed);
+      if isempty(dist_idx)
+          return; % No distributed atoms, no aggregation needed
+      end
+      
+      % Union-Find initialization
+      parent = 1:numel(dist_idx);
+      
+      function root = find_root(x)
+          if parent(x) ~= x
+              parent(x) = find_root(parent(x));
+          end
+          root = parent(x);
+      end
+      
+      function union(x, y)
+          rx = find_root(x);
+          ry = find_root(y);
+          if rx ~= ry
+              parent(ry) = rx;
+          end
+      end
+      
+      % Aggregation conditions: distance and angle
+      for i = 1:numel(dist_idx)
+          for j = i+1:numel(dist_idx)
+              idx_i = dist_idx(i);
+              idx_j = dist_idx(j);
+              
+              % Calculate distance
+              dx = theta_list(idx_i).x - theta_list(idx_j).x;
+              dy = theta_list(idx_i).y - theta_list(idx_j).y;
+              dist = sqrt(dx^2 + dy^2);
+              
+              if dist > cfg.agg_dist_thresh
+                  continue;
+              end
+              
+              % Calculate angle difference
+              phi_i = theta_list(idx_i).phi;
+              phi_j = theta_list(idx_j).phi;
+              angle_diff = abs(mod(phi_i - phi_j + pi, 2*pi) - pi) * 180 / pi;
+              
+              if angle_diff > cfg.agg_angle_thresh
+                  continue;
+              end
+              
+              % Check consistency of connection direction with scattering direction
+              conn_angle = atan2(dy, dx);
+              phi_avg = atan2(sin(phi_i) + sin(phi_j), cos(phi_i) + cos(phi_j));
+              conn_diff = abs(mod(conn_angle - phi_avg + pi, 2*pi) - pi) * 180 / pi;
+              
+              % Connection direction should be close to scattering direction (allow large deviation)
+              if conn_diff < 60 || conn_diff > 120
+                  union(i, j);
+              end
+          end
+      end
+      
+      % Group aggregation
+      groups = containers.Map('KeyType', 'double', 'ValueType', 'any');
+      for i = 1:numel(dist_idx)
+          root = find_root(i);
+          if ~groups.isKey(root)
+              groups(root) = [];
+          end
+          groups(root) = [groups(root), dist_idx(i)];
+      end
+      
+      % Update theta_list
+      group_keys = cell2mat(groups.keys);
+      for k = 1:numel(group_keys)
+          g_idx = groups(group_keys(k));
+          if numel(g_idx) > 1
+              % Calculate aggregated L (sum of all line element lengths)
+              L_total = 0;
+              for i = 1:numel(g_idx)
+                  L_total = L_total + theta_list(g_idx(i)).L;
+              end
+              % Update L for all atoms in group
+              for i = 1:numel(g_idx)
+                  theta_list(g_idx(i)).L = L_total;
+              end
+          end
+      end
+      
+      if cfg.verbose
+          fprintf('[AGG] aggregated %d distributed atoms into %d groups\n', ...
+              numel(dist_idx), numel(group_keys));
+      end
+  end
+
+  %% Refine L, alpha, gamma parameters
+  function theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg)
+      N = numel(theta_list);
+      if N == 0, return; end
+      
+      for i = 1:N
+          % Determine type by L
+          if theta_list(i).L > 0
+              % Distributed scattering center: gamma = 0
+              theta_list(i).gamma = cfg.gamma_distributed;
+              % L already determined in aggregation
+          else
+              % Localized scattering center: L = 0, estimate gamma > 0
+              theta_list(i).gamma = v6_fit_localized_gamma(theta_list(i), I, roi_mask, cfg);
+          end
+          
+          % Estimate alpha (scattering intensity)
+          theta_list(i).alpha = theta_list(i).A; % Simplified: use amplitude as alpha
+      end
+      
+      if cfg.verbose
+          n_loc = sum([theta_list.L] == 0);
+          n_dist = sum([theta_list.L] > 0);
+          fprintf('[REFINE] refined %d localized (L=0, gamma>0) and %d distributed (L>0, gamma=0)\n', ...
+              n_loc, n_dist);
+      end
+  end
+
+  %% Fit gamma for localized scattering center
+  function gamma = v6_fit_localized_gamma(theta, I, roi_mask, cfg)
+      % Fit radial decay model for localized scattering center: I(r) = A * exp(-gamma * r)
+      r = theta.row; c = theta.col;
+      [H, W] = size(I);
+      
+      % Extract local region
+      half_win = min(10, floor(cfg.patch_size / 2));
+      r1 = max(1, r - half_win); r2 = min(H, r + half_win);
+      c1 = max(1, c - half_win); c2 = min(W, c + half_win);
+      
+      I_patch = I(r1:r2, c1:c2);
+      mask_patch = roi_mask(r1:r2, c1:c2);
+      
+      % Calculate radial distance
+      [rows, cols] = size(I_patch);
+      [xx, yy] = meshgrid(1:cols, 1:rows);
+      cx = c - c1 + 1; cy = r - r1 + 1;
+      r_vals = sqrt((xx - cx).^2 + (yy - cy).^2);
+      
+      % Extract valid pixels
+      valid = mask_patch & (I_patch > 0) & (r_vals > 0.5);
+      if sum(valid(:)) < 5
+          gamma = 0.5; % Default value
+          return;
+      end
+      
+      r_data = r_vals(valid);
+      I_data = I_patch(valid);
+      
+      % Weighted least squares fitting: log(I) = log(A) - gamma * r
+      % Weight: closer to center has higher weight
+      weights = exp(-r_data / 3);
+      
+      % Build linear system: [1, r] * [log(A); -gamma] = log(I)
+      X = [ones(size(r_data)), r_data];
+      y = log(I_data + eps);
+      W = diag(weights);
+      
+      % Weighted least squares
+      try
+          beta = (X' * W * X) \ (X' * W * y);
+          gamma_est = -beta(2);
+      catch
+          gamma_est = 0.5;
+      end
+      
+      % Constrain to reasonable range
+      gamma = max(cfg.gamma_localized_range(1), min(cfg.gamma_localized_range(2), gamma_est));
   end
