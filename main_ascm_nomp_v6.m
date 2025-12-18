@@ -4,7 +4,7 @@
       fn  = fieldnames(user_cfg);
       for i = 1:numel(fn), cfg.(fn{i}) = user_cfg.(fn{i}); end
 
-      % 预处理
+      % Preprocessing
       I = abs(double(Img));
       if ~all(isfinite(I(:))), error('Input Img contains NaN/Inf.'); end
       if cfg.do_log, I = log1p(I); end
@@ -22,7 +22,7 @@
           theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg);
       end
 
-      % 解释能量
+      % Explained energy
       R0 = I .* roi_mask; E0 = sum(R0(:).^2);
       if isempty(theta_list)
           E_res = E0;
@@ -49,7 +49,7 @@
       end
   end
 
-  %% 默认参数：CornerDiff + 最小线元
+  %% Default parameters: CornerDiff + minimum line element
   function cfg = v6_default_cfg()
       cfg = struct();
       cfg.do_log       = false;
@@ -61,17 +61,17 @@
       cfg.roi_dilate        = 2;
       cfg.roi_margin        = 4;
 
-      cfg.patch_size    = 17;           % 奇数
-      cfg.L_list        = 1;            % 最小线元
-      cfg.phi_list_deg  = -80:5:80;     % 粗角度网格
+      cfg.patch_size    = 17;           % Odd number
+      cfg.L_list        = 1;            % Minimum line element
+      cfg.phi_list_deg  = -80:5:80;     % Coarse angle grid
       cfg.sigma_loc     = 1.0;
       cfg.sigma_short_thick = 1.0;
-      cfg.sigma_short_thin  = 0.6;      % 未用但保留
+      cfg.sigma_short_thin  = 0.6;      % Unused but kept
 
-      % 阈值与上限（分开控制）
-      cfg.min_ncc_localized   = 0.50;   % CornerDiff 更严格
-      cfg.min_ncc_distributed = 0.20;   % 线元放宽
-      cfg.min_gain_ratio      = 0.002;  % 单线元增益下限
+      % Thresholds and limits (separate control)
+      cfg.min_ncc_localized   = 0.50;   % CornerDiff stricter
+      cfg.min_ncc_distributed = 0.20;   % Line element relaxed
+      cfg.min_gain_ratio      = 0.002;  % Single line element gain lower bound
       cfg.stop_explained_ratio= 0.80;
       cfg.max_atoms           = 24;
       cfg.max_localized       = Inf;    % Allow multiple localized scattering centers
@@ -140,7 +140,7 @@
       g = g / max(norm(g(:)), eps);
       idx=idx+1; atoms(:,:,idx)=g; geom{idx}='CornerDiff'; cls{idx}='localized'; Ls(idx)=0; phis(idx)=0;
 
-      % 最小线元（ED_thick，L=1）
+      % Minimum line element (ED_thick, L=1)
       for ang = cfg.phi_list_deg(:).'
           phi = deg2rad(ang);
           patch = v6_build_ed_patch(cfg, 1, phi, 'ED_thick', xx, yy);
@@ -158,7 +158,7 @@
       if nargin < 5
           p = cfg.patch_size; h = (p-1)/2; [xx,yy] = meshgrid(-h:h, -h:h);
       end
-      L_eff = max(L, 1); % 保底 1 像素代表 0.1
+      L_eff = max(L, 1); % Minimum 1 pixel represents 0.1
       switch geom_type
           case 'ED_thick'
               sigma_long  = max(L_eff/3, 0.8);
@@ -191,7 +191,7 @@
               geom_type  = dict.geom{j};
               patch = dict.atom(:,:,j);
 
-              % 局域原子数量限制
+              % Localized atom count limit
               if strcmp(class_type,'localized') && n_localized >= cfg.max_localized
                   continue;
               end
@@ -208,7 +208,7 @@
               if den <= eps, continue; end
               ncc = num / den;
 
-              % 分开阈值
+              % Separate thresholds
               min_ncc_req = cfg.min_ncc_distributed;
               if strcmp(class_type,'localized'), min_ncc_req = cfg.min_ncc_localized; end
               if ncc < min_ncc_req, continue; end
@@ -233,7 +233,7 @@
               phi_ref  = phi0; patch_ref = dict.atom(:,:,best.idx);
           end
 
-          % 局部 LS 幅度估计
+          % Local LS amplitude estimation
           [R_patch_full, mask_patch_full] = v6_get_patch(R, roi_mask, best.r, best.c, cfg.patch_size);
           P = patch_ref .* mask_patch_full;
           den_loc = sum(P(:).^2);
@@ -366,7 +366,7 @@
           return; % No distributed atoms, no aggregation needed
       end
       
-      % Union-Find 初始化
+      % Union-Find initialization
       parent = 1:numel(dist_idx);
       
       function root = find_root(x)
