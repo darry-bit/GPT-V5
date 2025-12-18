@@ -1,9 +1,9 @@
-%% Demo: SAR 散射中心提取测试 (ASC-NOMP V6)
-% 测试改进后的算法：
-% 1. 通过 L 判断散射中心类型（L=0 局域式，L>0 分布式）
-% 2. 允许多个局域式散射中心
-% 3. 分布式 gamma=0，局域式 gamma>0
-% 4. 改进的参数估计顺序
+%% Demo: SAR Scattering Center Extraction Test (ASC-NOMP V6)
+% Test improved algorithm:
+% 1. Determine scattering center type by L (L=0 localized, L>0 distributed)
+% 2. Allow multiple localized scattering centers
+% 3. Distributed gamma=0, localized gamma>0
+% 4. Improved parameter estimation order
 
 function demo_sc_extraction_v6_test()
     fprintf('=== SAR Scattering Center Extraction Test (V6) ===\n\n');

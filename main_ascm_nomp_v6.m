@@ -16,7 +16,7 @@
       dict = v6_build_dict(cfg);
       [theta_list, residual_norms] = v6_run_nomp(I, roi_mask, dict, cfg);
       
-      % 聚合分布式原子并细化参数
+      % Aggregate distributed atoms and refine parameters
       if ~isempty(theta_list)
           theta_list = v6_aggregate_atoms(theta_list, cfg);
           theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg);
@@ -74,20 +74,20 @@
       cfg.min_gain_ratio      = 0.002;  % 单线元增益下限
       cfg.stop_explained_ratio= 0.80;
       cfg.max_atoms           = 24;
-      cfg.max_localized       = Inf;    % 允许多个局域式散射中心
+      cfg.max_localized       = Inf;    % Allow multiple localized scattering centers
       cfg.max_iters           = 128;
       
-      % Gamma 估计参数
-      cfg.gamma_localized_range = [0.1, 2.0];  % 局域式 gamma 范围
-      cfg.gamma_distributed     = 0;            % 分布式 gamma 固定为 0
+      % Gamma estimation parameters
+      cfg.gamma_localized_range = [0.1, 2.0];  % Localized gamma range
+      cfg.gamma_distributed     = 0;            % Distributed gamma fixed at 0
 
       cfg.do_phi_refine        = true;
       cfg.phi_refine_range_deg = 15;
       cfg.phi_refine_step_deg  = 1;
       
-      % 聚合参数
-      cfg.agg_dist_thresh  = 6;   % 放宽距离阈值
-      cfg.agg_angle_thresh = 30;  % 放宽角度阈值（度）
+      % Aggregation parameters
+      cfg.agg_dist_thresh  = 6;   % Relaxed distance threshold
+      cfg.agg_angle_thresh = 30;  % Relaxed angle threshold (degrees)
 
       cfg.verbose = true;
       cfg.dx=1; cfg.dy=1; cfg.x0=0; cfg.y0=0;
@@ -100,7 +100,9 @@
       if isempty(cfg.phi_list_deg) || any(~isfinite(cfg.phi_list_deg)), error('phi_list_deg must be finite.'); end
       cfg.max_atoms = max(1, floor(cfg.max_atoms));
       cfg.max_iters = max(1, floor(cfg.max_iters));
-      cfg.max_localized = max(0, floor(cfg.max_localized));
+      if ~isinf(cfg.max_localized)
+          cfg.max_localized = max(0, floor(cfg.max_localized));
+      end
       cfg.min_gain_ratio = max(cfg.min_gain_ratio,0);
       cfg.roi_dilate = max(0, round(cfg.roi_dilate));
       cfg.roi_margin = max(0, round(cfg.roi_margin));
@@ -260,7 +262,7 @@
           residual_norms(end+1) = sqrt(E_after); %#ok<AGROW>
           [x_m, y_m] = v6_rowcol_to_xy(best.r, best.c, H, W, cfg);
           
-          % 初始 gamma：distributed 用 0，localized 用默认值（后续细化）
+          % Initial gamma: 0 for distributed, default value for localized (refined later)
           gamma_init = 0.0;
           if strcmp(class_type,'localized')
               gamma_init = 0.5;
@@ -345,15 +347,15 @@
       y = (r0 - r) * cfg.dy + cfg.y0;
   end
 
-  %% 聚合分布式原子（Union-Find 算法）
+  %% Aggregate distributed atoms (Union-Find algorithm)
   function theta_list = v6_aggregate_atoms(theta_list, cfg)
       N = numel(theta_list);
       if N == 0, return; end
       
-      % 分离局域式和分布式原子
+      % Separate localized and distributed atoms
       is_distributed = false(1, N);
       for i = 1:N
-          % 通过 L 判断类型：L=0 为局域式，L>0 为分布式
+          % Determine type by L: L=0 is localized, L>0 is distributed
           if theta_list(i).L > 0
               is_distributed(i) = true;
           end
@@ -361,7 +363,7 @@
       
       dist_idx = find(is_distributed);
       if isempty(dist_idx)
-          return; % 没有分布式原子，无需聚合
+          return; % No distributed atoms, no aggregation needed
       end
       
       % Union-Find 初始化
@@ -382,13 +384,13 @@
           end
       end
       
-      % 聚合条件：距离和角度
+      % Aggregation conditions: distance and angle
       for i = 1:numel(dist_idx)
           for j = i+1:numel(dist_idx)
               idx_i = dist_idx(i);
               idx_j = dist_idx(j);
               
-              % 计算距离
+              % Calculate distance
               dx = theta_list(idx_i).x - theta_list(idx_j).x;
               dy = theta_list(idx_i).y - theta_list(idx_j).y;
               dist = sqrt(dx^2 + dy^2);
@@ -397,7 +399,7 @@
                   continue;
               end
               
-              % 计算角度差
+              % Calculate angle difference
               phi_i = theta_list(idx_i).phi;
               phi_j = theta_list(idx_j).phi;
               angle_diff = abs(mod(phi_i - phi_j + pi, 2*pi) - pi) * 180 / pi;
@@ -406,19 +408,19 @@
                   continue;
               end
               
-              % 检查连接方向与散射体方向的一致性
+              % Check consistency of connection direction with scattering direction
               conn_angle = atan2(dy, dx);
               phi_avg = atan2(sin(phi_i) + sin(phi_j), cos(phi_i) + cos(phi_j));
               conn_diff = abs(mod(conn_angle - phi_avg + pi, 2*pi) - pi) * 180 / pi;
               
-              % 连接方向应与散射体方向接近（允许较大偏差）
+              % Connection direction should be close to scattering direction (allow large deviation)
               if conn_diff < 60 || conn_diff > 120
                   union(i, j);
               end
           end
       end
       
-      % 聚合成组
+      % Group aggregation
       groups = containers.Map('KeyType', 'double', 'ValueType', 'any');
       for i = 1:numel(dist_idx)
           root = find_root(i);
@@ -428,17 +430,17 @@
           groups(root) = [groups(root), dist_idx(i)];
       end
       
-      % 更新 theta_list
+      % Update theta_list
       group_keys = cell2mat(groups.keys);
       for k = 1:numel(group_keys)
           g_idx = groups(group_keys(k));
           if numel(g_idx) > 1
-              % 计算聚合后的 L（所有线元长度之和）
+              % Calculate aggregated L (sum of all line element lengths)
               L_total = 0;
               for i = 1:numel(g_idx)
                   L_total = L_total + theta_list(g_idx(i)).L;
               end
-              % 更新组内所有原子的 L
+              % Update L for all atoms in group
               for i = 1:numel(g_idx)
                   theta_list(g_idx(i)).L = L_total;
               end
@@ -451,24 +453,24 @@
       end
   end
 
-  %% 细化 L、alpha、gamma 参数
+  %% Refine L, alpha, gamma parameters
   function theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg)
       N = numel(theta_list);
       if N == 0, return; end
       
       for i = 1:N
-          % 通过 L 判断类型
+          % Determine type by L
           if theta_list(i).L > 0
-              % 分布式散射中心：gamma = 0
+              % Distributed scattering center: gamma = 0
               theta_list(i).gamma = cfg.gamma_distributed;
-              % L 已在聚合中确定
+              % L already determined in aggregation
           else
-              % 局域式散射中心：L = 0，估计 gamma > 0
+              % Localized scattering center: L = 0, estimate gamma > 0
               theta_list(i).gamma = v6_fit_localized_gamma(theta_list(i), I, roi_mask, cfg);
           end
           
-          % 估计 alpha（散射强度）
-          theta_list(i).alpha = theta_list(i).A; % 简化：使用幅度作为 alpha
+          % Estimate alpha (scattering intensity)
+          theta_list(i).alpha = theta_list(i).A; % Simplified: use amplitude as alpha
       end
       
       if cfg.verbose
@@ -479,13 +481,13 @@
       end
   end
 
-  %% 拟合局域式散射中心的 gamma
+  %% Fit gamma for localized scattering center
   function gamma = v6_fit_localized_gamma(theta, I, roi_mask, cfg)
-      % 对局域式散射中心拟合径向衰减模型 I(r) = A * exp(-gamma * r)
+      % Fit radial decay model for localized scattering center: I(r) = A * exp(-gamma * r)
       r = theta.row; c = theta.col;
       [H, W] = size(I);
       
-      % 提取局部区域
+      % Extract local region
       half_win = min(10, floor(cfg.patch_size / 2));
       r1 = max(1, r - half_win); r2 = min(H, r + half_win);
       c1 = max(1, c - half_win); c2 = min(W, c + half_win);
@@ -493,32 +495,32 @@
       I_patch = I(r1:r2, c1:c2);
       mask_patch = roi_mask(r1:r2, c1:c2);
       
-      % 计算径向距离
+      % Calculate radial distance
       [rows, cols] = size(I_patch);
       [xx, yy] = meshgrid(1:cols, 1:rows);
       cx = c - c1 + 1; cy = r - r1 + 1;
       r_vals = sqrt((xx - cx).^2 + (yy - cy).^2);
       
-      % 提取有效像素
+      % Extract valid pixels
       valid = mask_patch & (I_patch > 0) & (r_vals > 0.5);
       if sum(valid(:)) < 5
-          gamma = 0.5; % 默认值
+          gamma = 0.5; % Default value
           return;
       end
       
       r_data = r_vals(valid);
       I_data = I_patch(valid);
       
-      % 加权最小二乘拟合：log(I) = log(A) - gamma * r
-      % 权重：距离中心越近权重越大
+      % Weighted least squares fitting: log(I) = log(A) - gamma * r
+      % Weight: closer to center has higher weight
       weights = exp(-r_data / 3);
       
-      % 构建线性系统：[1, r] * [log(A); -gamma] = log(I)
+      % Build linear system: [1, r] * [log(A); -gamma] = log(I)
       X = [ones(size(r_data)), r_data];
       y = log(I_data + eps);
       W = diag(weights);
       
-      % 加权最小二乘
+      % Weighted least squares
       try
           beta = (X' * W * X) \ (X' * W * y);
           gamma_est = -beta(2);
@@ -526,6 +528,6 @@
           gamma_est = 0.5;
       end
       
-      % 限制在合理范围内
+      % Constrain to reasonable range
       gamma = max(cfg.gamma_localized_range(1), min(cfg.gamma_localized_range(2), gamma_est));
   end
