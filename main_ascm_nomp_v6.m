@@ -15,6 +15,12 @@
       roi_mask = v6_build_roi(I, cfg);
       dict = v6_build_dict(cfg);
       [theta_list, residual_norms] = v6_run_nomp(I, roi_mask, dict, cfg);
+      
+      % 聚合分布式原子并细化参数
+      if ~isempty(theta_list)
+          theta_list = v6_aggregate_atoms(theta_list, cfg);
+          theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg);
+      end
 
       % 解释能量
       R0 = I .* roi_mask; E0 = sum(R0(:).^2);
@@ -68,12 +74,20 @@
       cfg.min_gain_ratio      = 0.002;  % 单线元增益下限
       cfg.stop_explained_ratio= 0.80;
       cfg.max_atoms           = 24;
-      cfg.max_localized       = 1;      % CornerDiff 最多 1 个
+      cfg.max_localized       = Inf;    % 允许多个局域式散射中心
       cfg.max_iters           = 128;
+      
+      % Gamma 估计参数
+      cfg.gamma_localized_range = [0.1, 2.0];  % 局域式 gamma 范围
+      cfg.gamma_distributed     = 0;            % 分布式 gamma 固定为 0
 
       cfg.do_phi_refine        = true;
       cfg.phi_refine_range_deg = 15;
       cfg.phi_refine_step_deg  = 1;
+      
+      % 聚合参数
+      cfg.agg_dist_thresh  = 6;   % 放宽距离阈值
+      cfg.agg_angle_thresh = 30;  % 放宽角度阈值（度）
 
       cfg.verbose = true;
       cfg.dx=1; cfg.dy=1; cfg.x0=0; cfg.y0=0;
@@ -164,7 +178,7 @@
       [H,W] = size(I);
       R  = I .* roi_mask; E0 = sum(R(:).^2);
       residual_norms = [];
-      theta_list = struct('row',{},'col',{},'A',{},'geom',{},'class',{},'L',{},'alpha',{},'phi',{},'dict_idx',{},'x',{},'y',{});
+      theta_list = struct('row',{},'col',{},'A',{},'geom',{},'class',{},'L',{},'alpha',{},'gamma',{},'phi',{},'dict_idx',{},'x',{},'y',{});
       if E0 <= 0, return; end
       n_localized = 0;
 
@@ -245,8 +259,15 @@
           R = R_new;
           residual_norms(end+1) = sqrt(E_after); %#ok<AGROW>
           [x_m, y_m] = v6_rowcol_to_xy(best.r, best.c, H, W, cfg);
+          
+          % 初始 gamma：distributed 用 0，localized 用默认值（后续细化）
+          gamma_init = 0.0;
+          if strcmp(class_type,'localized')
+              gamma_init = 0.5;
+          end
+          
           t = struct('row',best.r,'col',best.c,'A',A,'geom',geom_type,'class',class_type,...
-                     'L',L0,'alpha',-1.0,'phi',phi_ref,'dict_idx',best.idx,'x',x_m,'y',y_m);
+                     'L',L0,'alpha',-1.0,'gamma',gamma_init,'phi',phi_ref,'dict_idx',best.idx,'x',x_m,'y',y_m);
           theta_list(end+1) = t; %#ok<AGROW>
           if strcmp(class_type,'localized'), n_localized = n_localized + 1; end
 
@@ -322,4 +343,189 @@
       c0 = (W + 1) / 2; r0 = (H + 1) / 2;
       x = (c - c0) * cfg.dx + cfg.x0;
       y = (r0 - r) * cfg.dy + cfg.y0;
+  end
+
+  %% 聚合分布式原子（Union-Find 算法）
+  function theta_list = v6_aggregate_atoms(theta_list, cfg)
+      N = numel(theta_list);
+      if N == 0, return; end
+      
+      % 分离局域式和分布式原子
+      is_distributed = false(1, N);
+      for i = 1:N
+          % 通过 L 判断类型：L=0 为局域式，L>0 为分布式
+          if theta_list(i).L > 0
+              is_distributed(i) = true;
+          end
+      end
+      
+      dist_idx = find(is_distributed);
+      if isempty(dist_idx)
+          return; % 没有分布式原子，无需聚合
+      end
+      
+      % Union-Find 初始化
+      parent = 1:numel(dist_idx);
+      
+      function root = find_root(x)
+          if parent(x) ~= x
+              parent(x) = find_root(parent(x));
+          end
+          root = parent(x);
+      end
+      
+      function union(x, y)
+          rx = find_root(x);
+          ry = find_root(y);
+          if rx ~= ry
+              parent(ry) = rx;
+          end
+      end
+      
+      % 聚合条件：距离和角度
+      for i = 1:numel(dist_idx)
+          for j = i+1:numel(dist_idx)
+              idx_i = dist_idx(i);
+              idx_j = dist_idx(j);
+              
+              % 计算距离
+              dx = theta_list(idx_i).x - theta_list(idx_j).x;
+              dy = theta_list(idx_i).y - theta_list(idx_j).y;
+              dist = sqrt(dx^2 + dy^2);
+              
+              if dist > cfg.agg_dist_thresh
+                  continue;
+              end
+              
+              % 计算角度差
+              phi_i = theta_list(idx_i).phi;
+              phi_j = theta_list(idx_j).phi;
+              angle_diff = abs(mod(phi_i - phi_j + pi, 2*pi) - pi) * 180 / pi;
+              
+              if angle_diff > cfg.agg_angle_thresh
+                  continue;
+              end
+              
+              % 检查连接方向与散射体方向的一致性
+              conn_angle = atan2(dy, dx);
+              phi_avg = atan2(sin(phi_i) + sin(phi_j), cos(phi_i) + cos(phi_j));
+              conn_diff = abs(mod(conn_angle - phi_avg + pi, 2*pi) - pi) * 180 / pi;
+              
+              % 连接方向应与散射体方向接近（允许较大偏差）
+              if conn_diff < 60 || conn_diff > 120
+                  union(i, j);
+              end
+          end
+      end
+      
+      % 聚合成组
+      groups = containers.Map('KeyType', 'double', 'ValueType', 'any');
+      for i = 1:numel(dist_idx)
+          root = find_root(i);
+          if ~groups.isKey(root)
+              groups(root) = [];
+          end
+          groups(root) = [groups(root), dist_idx(i)];
+      end
+      
+      % 更新 theta_list
+      group_keys = cell2mat(groups.keys);
+      for k = 1:numel(group_keys)
+          g_idx = groups(group_keys(k));
+          if numel(g_idx) > 1
+              % 计算聚合后的 L（所有线元长度之和）
+              L_total = 0;
+              for i = 1:numel(g_idx)
+                  L_total = L_total + theta_list(g_idx(i)).L;
+              end
+              % 更新组内所有原子的 L
+              for i = 1:numel(g_idx)
+                  theta_list(g_idx(i)).L = L_total;
+              end
+          end
+      end
+      
+      if cfg.verbose
+          fprintf('[AGG] aggregated %d distributed atoms into %d groups\n', ...
+              numel(dist_idx), numel(group_keys));
+      end
+  end
+
+  %% 细化 L、alpha、gamma 参数
+  function theta_list = v6_refine_L_alpha_gamma(theta_list, I, roi_mask, cfg)
+      N = numel(theta_list);
+      if N == 0, return; end
+      
+      for i = 1:N
+          % 通过 L 判断类型
+          if theta_list(i).L > 0
+              % 分布式散射中心：gamma = 0
+              theta_list(i).gamma = cfg.gamma_distributed;
+              % L 已在聚合中确定
+          else
+              % 局域式散射中心：L = 0，估计 gamma > 0
+              theta_list(i).gamma = v6_fit_localized_gamma(theta_list(i), I, roi_mask, cfg);
+          end
+          
+          % 估计 alpha（散射强度）
+          theta_list(i).alpha = theta_list(i).A; % 简化：使用幅度作为 alpha
+      end
+      
+      if cfg.verbose
+          n_loc = sum([theta_list.L] == 0);
+          n_dist = sum([theta_list.L] > 0);
+          fprintf('[REFINE] refined %d localized (L=0, gamma>0) and %d distributed (L>0, gamma=0)\n', ...
+              n_loc, n_dist);
+      end
+  end
+
+  %% 拟合局域式散射中心的 gamma
+  function gamma = v6_fit_localized_gamma(theta, I, roi_mask, cfg)
+      % 对局域式散射中心拟合径向衰减模型 I(r) = A * exp(-gamma * r)
+      r = theta.row; c = theta.col;
+      [H, W] = size(I);
+      
+      % 提取局部区域
+      half_win = min(10, floor(cfg.patch_size / 2));
+      r1 = max(1, r - half_win); r2 = min(H, r + half_win);
+      c1 = max(1, c - half_win); c2 = min(W, c + half_win);
+      
+      I_patch = I(r1:r2, c1:c2);
+      mask_patch = roi_mask(r1:r2, c1:c2);
+      
+      % 计算径向距离
+      [rows, cols] = size(I_patch);
+      [xx, yy] = meshgrid(1:cols, 1:rows);
+      cx = c - c1 + 1; cy = r - r1 + 1;
+      r_vals = sqrt((xx - cx).^2 + (yy - cy).^2);
+      
+      % 提取有效像素
+      valid = mask_patch & (I_patch > 0) & (r_vals > 0.5);
+      if sum(valid(:)) < 5
+          gamma = 0.5; % 默认值
+          return;
+      end
+      
+      r_data = r_vals(valid);
+      I_data = I_patch(valid);
+      
+      % 加权最小二乘拟合：log(I) = log(A) - gamma * r
+      % 权重：距离中心越近权重越大
+      weights = exp(-r_data / 3);
+      
+      % 构建线性系统：[1, r] * [log(A); -gamma] = log(I)
+      X = [ones(size(r_data)), r_data];
+      y = log(I_data + eps);
+      W = diag(weights);
+      
+      % 加权最小二乘
+      try
+          beta = (X' * W * X) \ (X' * W * y);
+          gamma_est = -beta(2);
+      catch
+          gamma_est = 0.5;
+      end
+      
+      % 限制在合理范围内
+      gamma = max(cfg.gamma_localized_range(1), min(cfg.gamma_localized_range(2), gamma_est));
   end
